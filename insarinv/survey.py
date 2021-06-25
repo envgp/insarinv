@@ -54,16 +54,8 @@ class Rx(BaseTimeRx):
     def __init__(self, times, orientation=None, **kwargs):
         super().__init__(times=times, **kwargs)
 
-    @property
-    def P(self):
-        return self._P
 
-    @property
-    def nD(self):
-        return self.times.size
-
-    def eval(self, time_mesh, f):
-        
+    def getP(self, time_mesh):
         if self._P is None:
             P = self.getTimeP(time_mesh)
             n_data = self.times.size
@@ -73,5 +65,12 @@ class Rx(BaseTimeRx):
             data = np.r_[np.ones(n_data-1), -np.ones(n_data-1)]
             Prel = sp.coo_matrix((data, (I, J)), shape=(n_data, n_data))        
             self._P = Prel * P
+        return self._P
 
-        return self.P * f['b_t']
+    @property
+    def nD(self):
+        return self.times.size
+
+    def eval(self, time_mesh, f):
+        P = self.getP(time_mesh)
+        return P * f['b_t']

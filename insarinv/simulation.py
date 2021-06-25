@@ -66,6 +66,18 @@ class InSARSimulation1D(BaseSimulation):
         "time_channels (s)"
     )
 
+    verbose = False
+
+    _J_Sske = None
+    _J_Sskv = None
+    _J_Sska = None
+    _J_Kv = None
+    _J_h_min_0 = None
+    _J_b_equiv = None
+    _J_n_equiv = None
+    _J_h_aquifer = None
+
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
@@ -76,6 +88,8 @@ class InSARSimulation1D(BaseSimulation):
     @property
     def mesh(self):
         if getattr(self, "_mesh", None) is None:
+            if self.verbose:
+                print (">> construct mesh")
             hz = np.ones(self.nz)*self.b_equiv/2/self.nz
             self._mesh = TensorMesh([hz], x0='N')    
             self._mesh.set_cell_gradient_BC([['dirichlet', 'neumann']])        
@@ -96,7 +110,10 @@ class InSARSimulation1D(BaseSimulation):
     @property
     def time_mesh(self):
         if getattr(self, "_time_mesh", None) is None:
-            self._time_mesh = TensorMesh([np.diff(self.time_simulation)], x0=[self.time_simulation[0]])
+            self._time_mesh = TensorMesh(
+                [np.diff(self.time_simulation)], 
+                x0=[self.time_simulation[0]]
+            )
         return self._time_mesh
 
     @property
@@ -120,25 +137,6 @@ class InSARSimulation1D(BaseSimulation):
         if getattr(self, "_I", None) is None:
             self._I = utils.speye(self.mesh.n_cells)
         return self._I        
-
-    def getA(self, c):
-        """
-            Get a system matrix A
-        """
-        # c = Kv/Ssk (Diffusivity)
-        C = utils.sdiag(c)
-        A = (C*(self.L)-1/self.dt*self.I)
-        return A
-
-    def getRHS(self, c):
-        """
-            Get a system matrix A
-        """
-            # c = Kv/Ssk (Diffusivity)
-        C = utils.sdiag(c)
-        A = (C*(self.L)-1/self.dt*self.I)
-        return A
-
 
     def fields(self, m):
         
@@ -186,7 +184,7 @@ class InSARSimulation1D(BaseSimulation):
 
         INDS = np.zeros((n_time, mesh.n_cells), dtype=bool, order='C')
         INDSMIN = np.ones((n_time, mesh.nC), dtype=int, order='C') * -1
-
+        c_matrix = np.zeros((n_time, mesh.n_cells), dtype=float, order='C')
         # Time loop
         for i_time in range(n_time-1):
             
@@ -207,7 +205,7 @@ class InSARSimulation1D(BaseSimulation):
             # Create the diffusivity, c
             c = Kv/Ssk_tmp
             C = utils.sdiag(c)
-
+            c_matrix[i_time, :] = c
             # Solve a system: Ah = rhs
             A = (C@(self.L)-1/dt*I)
             rhs = -C@(self.DivB@bc) - h0/dt    
@@ -285,6 +283,8 @@ class InSARSimulation1D(BaseSimulation):
         b_e = Ce * (Psum @ (utils.mkvc(h) - Pmin @ utils.mkvc(h)))
         b_a = Ca * (Pa @ self.h_aquifer)
 
+        Pf = (Cv * Psum @ Pmin + Ce * Psum@(utils.speye(h.size)-Pmin))
+
         b_t = b_v + b_e + b_a        
                 
         f = {}
@@ -301,6 +301,8 @@ class InSARSimulation1D(BaseSimulation):
         f['b_v'] = b_v
         f['b_e'] = b_e
         f['b_a'] = b_a
+        f['Pf'] = Pf
+        f['c_matrix'] = c_matrix
 
         for prop in self._clear_on_update:
             delattr(self, prop)
@@ -323,7 +325,7 @@ class InSARSimulation1D(BaseSimulation):
             raise AttributeError(
                 "The survey has not yet been set and is required to compute "
                 "data. Please set the survey for the simulation: "
-                "simulation.survey = survey"
+                "self.survey = survey"
             )
 
         if f is None:
@@ -344,62 +346,79 @@ class InSARSimulation1D(BaseSimulation):
     # Need to test see if they can pass the order tests. 
 
     def get_J_Sskv(self, m, f=None, adjoint=False):
-        Sskv_current = self.Sskv
-        dSskv = 0.01 * Sskv_current
-        self.Sskv = Sskv_current - dSskv
-        f1 = self.fields([])
-        self.Sskv = Sskv_current + dSskv
-        f2 = self.fields([])
-        self.Sskv = Sskv_current
-        J_Sskv = (f2['b_t']-f1['b_t']) / (2*dSskv)
-        return J_Sskv.reshape([-1,1])
+        if self._J_Sskv not None:
+            return self._J_Sskv
+        else:        
+            Sskv_current = self.Sskv
+            dSskv = 0.01 * Sskv_current
+            self.Sskv = Sskv_current - dSskv
+            f1 = self.fields([])
+            self.Sskv = Sskv_current + dSskv
+            f2 = self.fields([])
+            self.Sskv = Sskv_current
+            self._J_Sskv = (self.dpred(f=f2)-self.dpred(f=f1)) / (2*dSskv)
+            self._J_Sskv = self._J_Sskv.reshape([-1,1])
+        return self._J_Sskv
 
     def get_J_Sske(self, m, f=None, adjoint=False):
-        Sske_current = self.Sske
-        dSske = 0.01 * Sske_current
-        self.Sske = Sske_current - dSske
-        f1 = self.fields([])
-        self.Sske = Sske_current + dSske
-        f2 = self.fields([])
-        self.Sske = Sske_current
-        J_Sske = (f2['b_t']-f1['b_t']) / (2*dSske)        
-        return J_Sske.reshape([-1,1])
+        if self._J_Sske not None:
+            return self._J_Sske
+        else:                
+            Sske_current = self.Sske
+            dSske = 0.01 * Sske_current
+            self.Sske = Sske_current - dSske
+            f1 = self.fields([])
+            self.Sske = Sske_current + dSske
+            f2 = self.fields([])
+            self.Sske = Sske_current
+            self._J_Sske = (self.dpred(f=f2)-self.dpred(f=f1)) / (2*dSske)        
+            self.self._J_Sske = _J_Sske.reshape([-1,1])
+            return self._J_Sske
 
     def get_J_Kv(self, m, f=None, adjoint=False):
-        Kv_current = self.Kv
-        dKv = 0.01 * Kv_current
-        self.Kv = Kv_current - dKv
-        f1 = self.fields([])
-        self.Kv = Kv_current + dKv
-        f2 = self.fields([])
-        self.Kv = Kv_current
-        J_Kv = (f2['b_t']-f1['b_t']) / (2*dKv)        
-        return J_Kv.reshape([-1,1])
+        if self._J_Kv not None:
+            return self._J_Kv
+        else:                        
+            Kv_current = self.Kv
+            dKv = 0.01 * Kv_current
+            self.Kv = Kv_current - dKv
+            f1 = self.fields([])
+            self.Kv = Kv_current + dKv
+            f2 = self.fields([])
+            self.Kv = Kv_current
+            self._J_Kv = (self.dpred(f=f2)-self.dpred(f=f1)) / (2*dKv)        
+            self._J_Kv = self._J_Kv.reshape([-1,1])
+            return self._J_Kv
 
     def get_J_b_equiv(self, m, f=None, adjoint=False):
-        b_equiv_current = self.b_equiv
-        db_equiv = 0.01 * b_equiv_current
-        self.b_equiv = b_equiv_current - db_equiv
-        f1 = self.fields([])
-        self.b_equiv = b_equiv_current + db_equiv
-        f2 = self.fields([])
-        self.b_equiv = b_equiv_current
-        J_b_equiv = (f2['b_t']-f1['b_t']) / (2*db_equiv)        
-        return J_b_equiv.reshape([-1,1])
+        if self._J_b_equiv not None:
+            return self._J_b_equiv
+        else:                                
+            b_equiv_current = self.b_equiv
+            db_equiv = 0.01 * b_equiv_current
+            self.b_equiv = b_equiv_current - db_equiv
+            f1 = self.fields([])
+            self.b_equiv = b_equiv_current + db_equiv
+            f2 = self.fields([])
+            self.b_equiv = b_equiv_current
+            self._J_b_equiv = (self.dpred(f=f2)-self.dpred(f=f1)) / (2*db_equiv)        
+            self._J_b_equiv = self._J_b_equiv.reshape([-1,1])
+            return self._J_b_equiv
 
     def get_J_h_min0(self, m, f=None, adjoint=False):
-        h_min0_current = self.h_min0
-        dh_min0 = 0.01 * h_min0_current
-        self.h_min0 = h_min0_current - dh_min0
-        f1 = self.fields([])
-        self.h_min0 = h_min0_current + dh_min0
-        f2 = self.fields([])
-        self.h_min0 = h_min0_current
-        J_h_min0 =  (f2['b_t']-f1['b_t']) / (2*dh_min0)     
-        return J_h_min0.reshape([-1,1])
-
-        # test below idea -> it is not working, so reality is a bit more complicated.
-        # return Cv * (Psum @ (emin_0-1))
+        if self._J_h_min0 not None:
+            return self._J_h_min0
+        else:                                        
+            h_min0_current = self.h_min0
+            dh_min0 = 0.01 * h_min0_current
+            self.h_min0 = h_min0_current - dh_min0
+            f1 = self.fields([])
+            self.h_min0 = h_min0_current + dh_min0
+            f2 = self.fields([])
+            self.h_min0 = h_min0_current
+            self._J_h_min0 =  (self.dpred(f=f2)-self.dpred(f=f1)) / (2*dh_min0)     
+            self._J_h_min0 = self._J_h_min0.reshape([-1,1])
+            return self._J_h_min0
 
     def get_J_n_equiv(self, m, f=None, adjoint=False):        
         if f is None:
@@ -419,12 +438,6 @@ class InSARSimulation1D(BaseSimulation):
         J_b_aquifer = self.Sska * (Pa @ self.h_aquifer)
         return J_b_aquifer.reshape([-1,1])
 
-    def get_J_h_aquifer(self, m, f=None, adjoint=False):
-        raise Exception("Not implemented yet!")
-        if f is None:
-            f = self.fields(m, f=f)
-        return self.get_J_h_aquifer_diff(m, f=f)
-
     def get_J_h_aquifer_diff(self, m, f=None, adjoint=False):        
         h_aquifer_current = self.h_aquifer.copy()
         J_h_aquifer = np.zeros((self.n_time, self.h_aquifer.size), dtype=float)
@@ -435,12 +448,83 @@ class InSARSimulation1D(BaseSimulation):
             f1 = self.fields([])
             self.h_aquifer[ii] = h_aquifer_ii + dh_aquifer_ii
             f2 = self.fields([])
-            J_h_aquifer[:,ii] =  (f2['b_t']-f1['b_t']) / (2*dh_aquifer_ii)     
+            J_h_aquifer[:,ii] =  (self.dpred(f=f2)-self.dpred(f=f1)) / (2*dh_aquifer_ii)     
         self.h_aquifer = h_aquifer_current
         return J_h_aquifer
 
-    def get_J(self, m, f=None):
-        pass
+    def getA(self, c):
+        """
+            Get a system matrix A
+        """
+        # c = Kv/Ssk (Diffusivity)
+        C = utils.sdiag(c)
+        A = (C*(self.L)-1/self.dt*self.I)
+        return A
+
+    def getB(self):
+        """
+            Get a system matrix A
+        """
+        return self.I / self.dt
+    
+    def get_drhsdh_aquifer(self, c, i_time):
+        if i_time == 0:
+            return 1/self.dt * np.ones((self.nz, 1))
+        else:
+            C = utils.sdiag(c)
+            # extract only the bottom boundary (dirichlet)
+            drhsdh = (-C @ self.DivB).toarray()[:,0].reshape([-1,1])
+            return drhsdh
+
+
+    def get_J_h_aquifer(self, m, f=None, adjoint=False):
+        """
+            G_rhs^T @ A^T @ P^T
+        """
+        if self._J_h_aquifer not None:
+            return self._J_h_aquifer
+        else:
+
+            if f is None:
+                f = self.fields(m)
+            
+            Pf = f['Pf']
+            Pa = f['Pa']
+            PT = []
+            PTa = []
+            for src in self.survey.source_list:
+                for rx in src.receiver_list:
+                    Prx = rx.getP(self.time_mesh)
+                    PT.append( (Prx @ Pf).toarray().T )
+                    PTa.append( (Prx @ Pa).toarray().T)
+
+            PT = np.hstack(PT)
+            PTa = np.hstack(PTa)
+            # Start backward propagation:
+            Y = np.zeros(PT.shape, dtype=float)
+            # assume the size of h_aquifer is n_time
+            self._J_h_aquifer = np.zeros((self.survey.nD, self.n_time), dtype=float)
+            SOL = np.zeros((self.nz, self.survey.nD))
+
+            for k in range(self.n_time-1,0,-1):
+                Pk = PT[k*self.nz:(k+1)*self.nz, :]
+                if k == self.n_time-1:
+                    RHS = Pk
+                    print (k, 'seogi')
+                else:
+                    Bk = self.getB()
+                    RHS = Pk - Bk @ SOL
+
+                c = f['c_matrix'][k,:]
+                AT = self.getA(c)
+                ATinv = self.Solver(AT)
+                SOL = ATinv * RHS
+                drhsdh_aquiferTk = self.get_drhsdh_aquifer(c, k).T
+                self._J_h_aquifer[:,k] = drhsdh_aquiferTk @ (SOL)
+            # Handle the initial condition
+            self._J_h_aquifer[:,0] = -self.get_drhsdh_aquifer([], 0).T @ SOL
+            self._J_h_aquifer += PTa.T
+            return self._J_h_aquifer
 
     def Jvec(self, m, v, f=None):
         # Output is nD x 1 vector
@@ -453,23 +537,21 @@ class InSARSimulation1D(BaseSimulation):
         Jvec += self.get_J_b_equiv(m, f=f) @ (self.b_equivDeriv @ v)
         Jvec += self.get_J_Sska(m, f=f) @ (self.SskaDeriv @ v)
         Jvec += self.get_J_b_aquifer(m, f=f) @ (self.b_aquiferDeriv @ v)
-        # May be this one could be optional for not to store J?
         Jvec += self.get_J_h_aquifer(m, f=f) @ (self.h_aquiferDeriv @ v)
         return Jvec
     
     def Jtvec(self, m, v, f=None):
         # Output is M x 1 vector
         Jtvec = np.zeros(m.size, dtype=float)
-        Jtvec += self.SskvDeriv.T * (self.get_J_Sskv(m, f=f, adjoint=True) @ v)
-        Jtvec += self.SskeDeriv.T * (self.get_J_Sske(m, f=f, adjoint=True) @ v)
-        Jtvec += self.KvDeriv.T * (self.get_J_Kv(m, f=f, adjoint=True) @ v)
-        Jtvec += self.h_min0Deriv.T * (self.get_J_h_min0(m, f=f, adjoint=True) @ v)
-        Jtvec += self.n_equivDeriv.T * (self.get_J_n_equiv(m, f=f, adjoint=True) @ v)
-        Jtvec += self.b_equivDeriv.T * (self.get_J_b_equiv(m, f=f, adjoint=True) @ v)
-        Jtvec += self.SskaDeriv.T * (self.get_J_Sska(m, f=f, adjoint=True) @ v)
-        Jtvec += self.b_aquiferDeriv.T * (self.get_J_b_aquifer(m, f=f, adjoint=True) @ v)
-        # May be this one could be optional for not to store J?
-        Jtvec += self.h_aquiferDeriv.T * (self.get_J_h_aquifer(m, f=f, adjoint=True) @ v)     
+        Jtvec += self.SskvDeriv.T * (self.get_J_Sskv(m, f=f).T @ v)
+        Jtvec += self.SskeDeriv.T * (self.get_J_Sske(m, f=f).T @ v)
+        Jtvec += self.KvDeriv.T * (self.get_J_Kv(m, f=f).T @ v)
+        Jtvec += self.h_min0Deriv.T * (self.get_J_h_min0(m, f=f).T @ v)
+        Jtvec += self.n_equivDeriv.T * (self.get_J_n_equiv(m, f=f).T @ v)
+        Jtvec += self.b_equivDeriv.T * (self.get_J_b_equiv(m, f=f).T @ v)
+        Jtvec += self.SskaDeriv.T * (self.get_J_Sska(m, f=f).T @ v)
+        Jtvec += self.b_aquiferDeriv.T * (self.get_J_b_aquifer(m, f=f).T @ v)
+        Jtvec += self.h_aquiferDeriv.T * (self.get_J_h_aquifer(m, f=f).T @ v)     
         return Jtvec
 
     @property
