@@ -455,7 +455,7 @@ class InSARSimulation1D(BaseSimulation):
         Psum = sp.coo_matrix((data, (I, J)), shape=(n_time,n)).tocsr()
         emin_0 = (~inds_active).astype(float)
 
-        Cv = (2*Sskv * n_equiv * dz)
+        Cv = (2 * Sskv * n_equiv * dz)
         Ce = (2 * Sske * n_equiv * dz)
 
         I = np.hstack([np.arange(n_time-ii) + ii for ii in range(n_time)])
@@ -472,7 +472,7 @@ class InSARSimulation1D(BaseSimulation):
         b_v = Cv * (Pa) @ (Psum @ (Pmin @ utils.mkvc(h) + (emin_0-1) * h_min0))
         # there seems correlated error with time steps when Ssk is changing
         # median filter
-        # b_v = np.r_[0, np.cumsum(medfilt(np.diff(b_v)))]
+        b_v = np.r_[0, np.cumsum(medfilt(np.diff(b_v)))]
         b_e = Ce * (Pa) @ (Psum @ (utils.mkvc(h) - Pmin @ utils.mkvc(h)))
         b_a = Ca * (Pa @ self.h_aquifer)
 
