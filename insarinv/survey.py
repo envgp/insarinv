@@ -48,7 +48,7 @@ class Rx(BaseTimeRx):
     :param numpy.ndarray times: times
     :param string orientation: receiver orientation 'x', 'y' or 'z'
     """
-    
+
     _P = None
 
     def __init__(self, times, orientation=None, **kwargs):
@@ -63,7 +63,7 @@ class Rx(BaseTimeRx):
             I = np.r_[tmp, tmp].astype(int)
             J = np.r_[tmp, np.zeros(n_data-1)].astype(int)
             data = np.r_[np.ones(n_data-1), -np.ones(n_data-1)]
-            Prel = sp.coo_matrix((data, (I, J)), shape=(n_data, n_data))        
+            Prel = sp.coo_matrix((data, (I, J)), shape=(n_data, n_data))
             self._P = Prel * P
         return self._P
 
